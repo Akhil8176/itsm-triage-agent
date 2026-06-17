@@ -1,72 +1,38 @@
-# ITSM Incident Triage Agent
-# Automatically classifies IT incidents by priority, category, and assignment group
+from openai import OpenAI
 
-def classify_incident(title, description):
-    title = title.lower()
-    description = description.lower()
-    text = title + " " + description
+import os
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+def ai_triage(title, description):
+    prompt = f"""You are an expert ITSM triage agent. Analyze this IT incident and respond ONLY in this exact format:
 
-    # --- Determine Category ---
-    if any(word in text for word in ["server", "database", "cpu", "memory", "disk", "storage"]):
-        category = "Infrastructure"
-    elif any(word in text for word in ["login", "password", "access", "permission", "locked"]):
-        category = "Access Management"
-    elif any(word in text for word in ["network", "vpn", "wifi", "internet", "connectivity"]):
-        category = "Network"
-    elif any(word in text for word in ["email", "outlook", "teams", "calendar"]):
-        category = "Collaboration Tools"
-    elif any(word in text for word in ["software", "application", "app", "install", "crash"]):
-        category = "Application Support"
-    else:
-        category = "General IT"
+CATEGORY: [one of: Infrastructure, Access Management, Network, Collaboration Tools, Application Support, General IT]
+PRIORITY: [one of: P1 - Critical, P2 - High, P3 - Medium, P4 - Low]
+SLA: [one of: 1 hour, 4 hours, 8 hours, 24 hours]
+ASSIGNMENT GROUP: [one of: Infrastructure Team, Security & IAM Team, Network Operations Team, End User Computing Team, Application Support Team, Service Desk]
+REASON: [one sentence explaining why you chose this priority]
 
-    # --- Determine Priority ---
-    if any(word in text for word in ["down", "outage", "critical", "production", "all users", "everyone"]):
-        priority = "P1 - Critical"
-        sla = "1 hour"
-    elif any(word in text for word in ["slow", "intermittent", "some users", "degraded"]):
-        priority = "P2 - High"
-        sla = "4 hours"
-    elif any(word in text for word in ["single user", "one user", "my", "i cannot", "i can't"]):
-        priority = "P3 - Medium"
-        sla = "8 hours"
-    else:
-        priority = "P4 - Low"
-        sla = "24 hours"
+Incident Title: {title}
+Incident Description: {description}"""
 
-    # --- Assign Group ---
-    assignment_map = {
-        "Infrastructure": "Infrastructure Team",
-        "Access Management": "Security & IAM Team",
-        "Network": "Network Operations Team",
-        "Collaboration Tools": "End User Computing Team",
-        "Application Support": "Application Support Team",
-        "General IT": "Service Desk"
-    }
-    assignment_group = assignment_map[category]
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300
+    )
 
-    return {
-        "category": category,
-        "priority": priority,
-        "sla": sla,
-        "assignment_group": assignment_group
-    }
-
+    return response.choices[0].message.content
 
 def run_triage():
-    print("\n========== ITSM Incident Triage Agent ==========")
+    print("\n========== AI-Powered ITSM Incident Triage Agent ==========")
     title = input("Enter incident title: ")
     description = input("Enter incident description: ")
 
-    result = classify_incident(title, description)
+    print("\nAnalyzing incident with AI...\n")
+    result = ai_triage(title, description)
 
-    print("\n--- Triage Result ---")
-    print(f"Category       : {result['category']}")
-    print(f"Priority       : {result['priority']}")
-    print(f"SLA Target     : {result['sla']}")
-    print(f"Assign To      : {result['assignment_group']}")
-    print("=============================================\n")
-
+    print("--- AI Triage Result ---")
+    print(result)
+    print("============================================================\n")
 
 if __name__ == "__main__":
     run_triage()
