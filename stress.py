@@ -1,18 +1,23 @@
-import time
 import multiprocessing
+import time
 
-def burn_cpu():
-    end_time = time.time() + 20
+DURATION_SECONDS = 60
+
+
+def burn_cpu(seconds):
+    end_time = time.time() + seconds
+    n = 0
     while time.time() < end_time:
-        x = 99999999 ** 2
+        for _ in range(100_000):
+            n = (n * 31 + 7) % 1_000_003
+
 
 if __name__ == "__main__":
-    print("Stressing CPU for 20 seconds across multiple cores...")
-    processes = []
-    for _ in range(multiprocessing.cpu_count()):
-        p = multiprocessing.Process(target=burn_cpu)
+    cores = multiprocessing.cpu_count()
+    print(f"Stressing CPU on all {cores} cores for {DURATION_SECONDS} seconds...")
+    processes = [multiprocessing.Process(target=burn_cpu, args=(DURATION_SECONDS,)) for _ in range(cores)]
+    for p in processes:
         p.start()
-        processes.append(p)
     for p in processes:
         p.join()
     print("Done.")
