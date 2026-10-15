@@ -2,7 +2,9 @@
 
 An AI-powered ITSM agent that detects system issues, generates incidents, and triages them on its own, with human review reserved for high-priority incidents. Built to demonstrate how LLM-based reasoning can fill a real gap in enterprise ITSM tooling.
 
-<!-- Demo: add a GIF of monitor.py + stress.py here, e.g. ![Demo](demo.gif) -->
+![Demo: a CPU spike is detected, triaged as P2, and held for human review](demo.gif)
+
+*Live run: `stress.py` pushes CPU to 100%, the agent opens one incident, the model triages it, and the high-priority result is held for human review.*
 
 ## The Problem
 
