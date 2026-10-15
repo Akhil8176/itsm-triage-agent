@@ -1,15 +1,22 @@
-import psutil
-import time
 import json
+import time
 from datetime import datetime
-from openai import OpenAI
 
-import os
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+import psutil
+
+from triage import MODEL, ai_triage, needs_review, parse_triage
 
 CPU_THRESHOLD = 70
 MEMORY_THRESHOLD = 80
 DISK_THRESHOLD = 90
+
+POLL_SECONDS = 5
+# While a condition stays breached, don't open a duplicate incident
+# for the same metric until this many seconds have passed.
+COOLDOWN_SECONDS = 300
+
+LOG_FILE = "incidents_log.json"
+
 
 def get_system_metrics():
     cpu = psutil.cpu_percent(interval=1)
@@ -17,77 +24,86 @@ def get_system_metrics():
     disk = psutil.disk_usage('/').percent
     return cpu, memory, disk
 
+
 def detect_anomaly(cpu, memory, disk):
+    """Return a list of (metric, message) for each breached threshold."""
     issues = []
     if cpu > CPU_THRESHOLD:
-        issues.append(f"High CPU usage detected: {cpu}%")
+        issues.append(("cpu", f"High CPU usage detected: {cpu}%"))
     if memory > MEMORY_THRESHOLD:
-        issues.append(f"High memory usage detected: {memory}%")
+        issues.append(("memory", f"High memory usage detected: {memory}%"))
     if disk > DISK_THRESHOLD:
-        issues.append(f"Low disk space detected: {disk}% used")
+        issues.append(("disk", f"Low disk space detected: {disk}% used"))
     return issues
 
-def ai_triage(title, description):
-    prompt = f"""You are an expert ITSM triage agent. Analyze this IT incident and respond ONLY in this exact format:
 
-CATEGORY: [one of: Infrastructure, Access Management, Network, Collaboration Tools, Application Support, General IT]
-PRIORITY: [one of: P1 - Critical, P2 - High, P3 - Medium, P4 - Low]
-SLA: [one of: 1 hour, 4 hours, 8 hours, 24 hours]
-ASSIGNMENT GROUP: [one of: Infrastructure Team, Security & IAM Team, Network Operations Team, End User Computing Team, Application Support Team, Service Desk]
-REASON: [one sentence explaining why you chose this priority]
-
-Incident Title: {title}
-Incident Description: {description}"""
-
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300
-    )
-    return response.choices[0].message.content
-
-def log_incident(issue, ai_result):
+def log_incident(issue, ai_result, status):
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "detected_issue": issue,
-        "ai_triage_result": ai_result
+        "model": MODEL,
+        "status": status,
+        "ai_triage_result": ai_result,
     }
     try:
-        with open("incidents_log.json", "r") as f:
+        with open(LOG_FILE, "r") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         data = []
     data.append(entry)
-    with open("incidents_log.json", "w") as f:
+    with open(LOG_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
 
 def run_monitor():
     print("\n========== Autonomous ITSM Monitoring Agent ==========")
+    print(f"Model: {MODEL}")
     print("Watching system health... (Press Ctrl+C to stop)\n")
+
+    last_incident = {}  # metric -> time an incident was last opened
 
     while True:
         cpu, memory, disk = get_system_metrics()
         print(f"[{datetime.now().strftime('%H:%M:%S')}] CPU: {cpu}% | Memory: {memory}% | Disk: {disk}%")
 
-        issues = detect_anomaly(cpu, memory, disk)
+        breached = set()
+        for metric, issue in detect_anomaly(cpu, memory, disk):
+            breached.add(metric)
+            now = time.time()
+            if now - last_incident.get(metric, 0) < COOLDOWN_SECONDS:
+                continue  # incident already open for this condition
+            last_incident[metric] = now
 
-        if issues:
-            for issue in issues:
-                print(f"\n🚨 ANOMALY DETECTED: {issue}")
-                print("Auto-generating incident and triaging with AI...\n")
+            print(f"\n🚨 ANOMALY DETECTED: {issue}")
+            print("Auto-generating incident and triaging with AI...\n")
 
-                title = "System Performance Anomaly Detected"
-                description = f"Automated monitoring detected the following condition: {issue}. This was detected without human intervention via continuous system health monitoring."
+            title = "System Performance Anomaly Detected"
+            description = (
+                f"Automated monitoring detected the following condition: {issue}. "
+                "This was detected without human intervention via continuous system health monitoring."
+            )
 
-                result = ai_triage(title, description)
-                print("--- AI Triage Result ---")
-                print(result)
-                print("=" * 60)
+            result = ai_triage(title, description)
+            status = "pending_review" if needs_review(parse_triage(result)) else "auto_assigned"
 
-                log_incident(issue, result)
-                print("Incident logged to incidents_log.json\n")
+            print("--- AI Triage Result ---")
+            print(result)
+            if status == "pending_review":
+                print("\nSTATUS: Pending human review (high priority)")
+            else:
+                print("\nSTATUS: Auto-assigned")
+            print("=" * 60)
 
-        time.sleep(5)
+            log_incident(issue, result, status)
+            print(f"Incident logged to {LOG_FILE}\n")
+
+        # A metric that has recovered can raise a fresh incident next time.
+        for metric in list(last_incident):
+            if metric not in breached:
+                del last_incident[metric]
+
+        time.sleep(POLL_SECONDS)
+
 
 if __name__ == "__main__":
     try:
