@@ -41,39 +41,35 @@ def _get(path, params):
 
 
 class Taxonomy:
-    """The instance's own categories and incident-handling groups."""
+    """The categories and groups this instance actually uses on incidents.
+
+    Learned from the incident table with the Aggregate API, so the
+    integration user only needs the itil role (no access to sys_choice).
+    """
 
     def __init__(self):
-        choices = _get("/api/now/table/sys_choice", {
-            "sysparm_query": "name=incident^element=category^inactive=false^language=en",
-            "sysparm_fields": "label,value",
-        })
-        self.category_value = {c["label"]: c["value"] for c in choices}
-
+        self.category_value = self._used_values("category")
+        self.group_id = self._used_values("assignment_group")
         override = os.environ.get("SN_GROUPS")
         if override:
-            names = [n.strip() for n in override.split(",") if n.strip()]
-            query = "active=true^nameIN" + ",".join(names)
-        else:
-            # Groups that actually work incidents on this instance.
-            stats = _get("/api/now/stats/incident", {
-                "sysparm_group_by": "assignment_group",
-                "sysparm_count": "true",
-                "sysparm_display_value": "true",
-            })
-            names = [
-                f["display_value"]
-                for s in stats
-                for f in s.get("groupby_fields", [])
-                if f.get("display_value")
-            ]
-            query = "active=true^nameIN" + ",".join(names) if names else "active=true"
-        groups = _get("/api/now/table/sys_user_group", {
-            "sysparm_query": query,
-            "sysparm_fields": "name,sys_id",
-            "sysparm_limit": "25",
+            keep = {n.strip() for n in override.split(",") if n.strip()}
+            self.group_id = {n: v for n, v in self.group_id.items() if n in keep}
+
+    @staticmethod
+    def _used_values(field):
+        """Return {display label: stored value} for values used on incidents."""
+        stats = _get("/api/now/stats/incident", {
+            "sysparm_group_by": field,
+            "sysparm_count": "true",
+            "sysparm_display_value": "all",
         })
-        self.group_id = {g["name"]: g["sys_id"] for g in groups}
+        out = {}
+        for s in stats:
+            for f in s.get("groupby_fields", []):
+                label, value = f.get("display_value"), f.get("value")
+                if label and value:
+                    out[label] = value
+        return out
 
     def as_prompt_taxonomy(self):
         return {
