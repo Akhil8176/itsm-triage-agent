@@ -6,3 +6,5 @@ venv/
 incidents_log.json
 eval_results*
 *.csv
+audit_key.json
+smoke.*
