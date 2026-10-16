@@ -66,10 +66,16 @@ def run_monitor():
     taxonomy = None
     prompt_taxonomy = DEFAULT_TAXONOMY
     if servicenow.configured():
-        taxonomy = servicenow.Taxonomy()
-        prompt_taxonomy = taxonomy.as_prompt_taxonomy()
-        print(f"ServiceNow: {servicenow._base()}")
-        print(f"  {len(taxonomy.category_value)} categories, {len(taxonomy.group_id)} assignment groups loaded from the instance")
+        try:
+            taxonomy = servicenow.Taxonomy()
+            if not taxonomy.category_value or not taxonomy.group_id:
+                raise RuntimeError("no categories or groups found on existing incidents")
+            prompt_taxonomy = taxonomy.as_prompt_taxonomy()
+            print(f"ServiceNow: {servicenow._base()}")
+            print(f"  {len(taxonomy.category_value)} categories, {len(taxonomy.group_id)} assignment groups loaded from the instance")
+        except Exception as exc:
+            taxonomy = None
+            print(f"ServiceNow: could not load taxonomy ({exc}). Logging locally only.")
     else:
         print("ServiceNow: not configured (logging locally only)")
     print("Watching system health... (Press Ctrl+C to stop)\n")
