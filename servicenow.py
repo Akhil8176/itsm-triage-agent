@@ -50,6 +50,13 @@ class Taxonomy:
     def __init__(self):
         self.category_value = self._used_values("category")
         self.group_id = self._used_values("assignment_group")
+        # Monitoring incidents are raised by the integration user itself.
+        users = _get("/api/now/table/sys_user", {
+            "sysparm_query": f"user_name={os.environ['SN_USER']}",
+            "sysparm_fields": "sys_id",
+            "sysparm_limit": "1",
+        })
+        self.caller_id = users[0]["sys_id"] if users else ""
         override = os.environ.get("SN_GROUPS")
         if override:
             keep = {n.strip() for n in override.split(",") if n.strip()}
@@ -90,6 +97,7 @@ def create_incident(title, description, result, status, why, taxonomy):
         f"Reason: {d.get('REASON')}\n"
     )
     payload = {
+        "caller_id": taxonomy.caller_id,
         "short_description": title,
         "description": description,
         "impact": impact,
