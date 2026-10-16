@@ -23,9 +23,6 @@ DEFAULT_TAXONOMY = {
     "ASSIGNMENT GROUP": ["Service Desk", "Network", "Hardware", "Software", "Database"],
 }
 
-# The fields whose agreement decides confidence.
-DECISION_FIELDS = ("CATEGORY", "PRIORITY", "ASSIGNMENT GROUP")
-
 _client = None
 
 
@@ -115,8 +112,8 @@ def triage_with_confidence(title, description, taxonomy=DEFAULT_TAXONOMY, sample
     else:
         decision["REASON"] = parsed[0].get("REASON", "")
 
-    decision_fields = [f for f in DECISION_FIELDS if f in taxonomy] or list(taxonomy)
-    score = min(agreement[f] for f in decision_fields)
+    # Every field the model was asked to decide counts toward confidence.
+    score = min(agreement[f] for f in taxonomy)
     return {
         "decision": decision,
         "agreement": agreement,

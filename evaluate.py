@@ -7,14 +7,16 @@ Runs labeled tickets through the triage and reports:
 
 Example:
   python3 evaluate.py --csv tickets.csv \
-      --text-cols subject,body \
-      --label "CATEGORY=queue" --label "PRIORITY=priority" \
+      --filter "language=en" \
+      --filter "queue=Technical Support|IT Support|Product Support|Service Outages and Maintenance" \
+      --label "TYPE=type" --label "PRIORITY=priority" --label "ASSIGNMENT GROUP=queue" \
       --n 300
 """
 import argparse
 import csv
 import json
 import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from triage import MODEL, triage_with_confidence
@@ -24,7 +26,8 @@ def load(path, text_cols, labels, n, seed, filters):
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     for col, value in filters:
-        rows = [r for r in rows if (r.get(col) or "").strip() == value]
+        allowed = set(value.split("|"))
+        rows = [r for r in rows if (r.get(col) or "").strip() in allowed]
     rows = [r for r in rows if all((r.get(c) or "").strip() for c in labels.values())]
     taxonomy = {field: sorted({r[c].strip() for r in rows}) for field, c in labels.items()}
     random.Random(seed).shuffle(rows)
@@ -50,7 +53,7 @@ def main():
     ap.add_argument("--csv", required=True)
     ap.add_argument("--text-cols", default="subject,body")
     ap.add_argument("--label", action="append", required=True, help="FIELD=column, e.g. CATEGORY=queue")
-    ap.add_argument("--filter", action="append", default=[], help="column=value, e.g. language=en")
+    ap.add_argument("--filter", action="append", default=[], help="column=value or column=a|b|c, e.g. language=en")
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--samples", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
@@ -97,6 +100,13 @@ def main():
         accs = [pct(sum(correct(t, r, f) for t, r in group), len(group)) for f in fields]
         allr = pct(sum(all(correct(t, r, f) for f in fields) for t, r in group), len(group))
         lines.append(f"| {name} | {len(group)} | " + " | ".join(accs) + f" | {allr} |")
+
+    # Baseline: always guess the most common label for each field.
+    base = []
+    for f in fields:
+        top, n = Counter(t["truth"][f] for t, r in ok).most_common(1)[0]
+        base.append(f"{pct(n, len(ok))} ('{top}')")
+    lines.append("| Baseline (always guess most common) | " + str(len(ok)) + " | " + " | ".join(base) + " | |")
 
     wrong = [(t, r) for t, r in ok if not all(correct(t, r, f) for f in fields)]
     caught = sum(1 for t, r in wrong if not r["confident"])
