@@ -4,7 +4,8 @@ from datetime import datetime
 
 import psutil
 
-from triage import MODEL, ai_triage, needs_review, parse_triage
+import servicenow
+from triage import DEFAULT_TAXONOMY, MODEL, SAMPLES, format_result, route, triage_with_confidence
 
 CPU_THRESHOLD = 70
 MEMORY_THRESHOLD = 80
@@ -37,13 +38,16 @@ def detect_anomaly(cpu, memory, disk):
     return issues
 
 
-def log_incident(issue, ai_result, status):
+def log_incident(issue, result, status, why, sn_number=None):
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "detected_issue": issue,
         "model": MODEL,
         "status": status,
-        "ai_triage_result": ai_result,
+        "why": why,
+        "confidence": result["confidence"],
+        "decision": result["decision"],
+        "servicenow_incident": sn_number,
     }
     try:
         with open(LOG_FILE, "r") as f:
@@ -57,7 +61,17 @@ def log_incident(issue, ai_result, status):
 
 def run_monitor():
     print("\n========== Autonomous ITSM Monitoring Agent ==========")
-    print(f"Model: {MODEL}")
+    print(f"Model: {MODEL} | Samples per incident: {SAMPLES}")
+
+    taxonomy = None
+    prompt_taxonomy = DEFAULT_TAXONOMY
+    if servicenow.configured():
+        taxonomy = servicenow.Taxonomy()
+        prompt_taxonomy = taxonomy.as_prompt_taxonomy()
+        print(f"ServiceNow: {servicenow._base()}")
+        print(f"  {len(taxonomy.category_value)} categories, {len(taxonomy.group_id)} assignment groups loaded from the instance")
+    else:
+        print("ServiceNow: not configured (logging locally only)")
     print("Watching system health... (Press Ctrl+C to stop)\n")
 
     last_incident = {}  # metric -> time an incident was last opened
@@ -77,24 +91,30 @@ def run_monitor():
             print(f"\n🚨 ANOMALY DETECTED: {issue}")
             print("Auto-generating incident and triaging with AI...\n")
 
-            title = "System Performance Anomaly Detected"
+            title = f"Monitoring alert: {issue}"
             description = (
                 f"Automated monitoring detected the following condition: {issue}. "
                 "This was detected without human intervention via continuous system health monitoring."
             )
 
-            result = ai_triage(title, description)
-            status = "pending_review" if needs_review(parse_triage(result)) else "auto_assigned"
+            result = triage_with_confidence(title, description, prompt_taxonomy)
+            status, why = route(result)
 
             print("--- AI Triage Result ---")
-            print(result)
-            if status == "pending_review":
-                print("\nSTATUS: Pending human review (high priority)")
-            else:
-                print("\nSTATUS: Auto-assigned")
+            print(format_result(result))
+            label = "Pending human review" if status == "pending_review" else "Auto-assigned"
+            print(f"\nSTATUS: {label} ({why})")
+
+            sn_number = None
+            if taxonomy:
+                try:
+                    sn_number, url = servicenow.create_incident(title, description, result, status, why, taxonomy)
+                    print(f"ServiceNow: created {sn_number}  {url}")
+                except Exception as exc:  # keep monitoring even if the instance is unreachable
+                    print(f"ServiceNow: failed to create incident ({exc})")
             print("=" * 60)
 
-            log_incident(issue, result, status)
+            log_incident(issue, result, status, why, sn_number)
             print(f"Incident logged to {LOG_FILE}\n")
 
         # A metric that has recovered can raise a fresh incident next time.

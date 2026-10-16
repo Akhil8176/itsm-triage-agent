@@ -4,3 +4,5 @@ __pycache__/
 venv/
 .env
 incidents_log.json
+eval_results*
+*.csv
