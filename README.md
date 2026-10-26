@@ -1,94 +1,86 @@
 # ITSM Incident Triage Agent
 
-An AI-powered ITSM agent that detects system issues, generates incidents, and triages them on its own, with human review reserved for high-priority incidents. Built to demonstrate how LLM-based reasoning can fill a real gap in enterprise ITSM tooling.
+An agent that detects system problems, opens incidents in ServiceNow, and triages them with an LLM. Critical or uncertain calls are held for a human. The project also tests how far that triage can be trusted, and found that the benchmark was the weak link, not the model.
 
 ![Demo: a CPU spike is detected, triaged as P2, and held for human review](demo.gif)
 
 *Live run: `stress.py` pushes CPU to 100%, the agent opens one incident, the model triages it, and the high-priority result is held for human review.*
 
-## The Problem
+## Key finding
 
-ServiceNow's built-in AI (Predictive Intelligence) requires historical incident data to triage effectively. New ServiceNow implementations have zero historical tickets, so the AI doesn't work well on day one — it needs months of accumulated data first.
+On 300 labeled IT tickets, the model looked worse than guessing on priority (38% vs. a 47% baseline). A blind audit told a different story. I labeled 39 of those tickets myself, as a ServiceNow administrator, without seeing either the dataset's label or the model's answer.
 
-This project explores an alternative: using a pre-trained LLM that requires zero training data and works immediately. The agent detects problems on its own and triages them in real time.
+| Field | I agree with the dataset | I agree with the model | Random chance |
+|---|---|---|---|
+| Type (Incident / Request / Problem / Change) | 59% | **85%** | 25% |
+| Priority (high / medium / low) | 36% | **85%** | 33% |
+| Assignment group (4 IT queues) | 28% | **54%** | 25% |
 
-## How It Works
+On priority and group, the dataset's labels were close to random relative to an administrator's judgment. The model's "low accuracy" was mostly disagreement with a noisy answer key.
 
-The system has two layers:
+**Lesson:** before trusting an AI triage score, check the labels it is scored against.
 
-1. **Autonomous Detection (monitor.py)**
-Continuously watches real system health metrics (CPU, memory, disk) on the host machine. When a threshold is breached, it automatically generates an incident — no human files a ticket. A cooldown prevents duplicate incidents while the same condition stays breached, so one sustained spike produces one ticket, not an alert storm.
+**Second finding: self-consistency was not a reliable confidence signal.** Each ticket is triaged three times, and disagreement routes it to a human. Across the 300 tickets, the flag caught mistakes at roughly the rate random flagging would. It helped on type (72% vs. 52% accuracy for confident vs. flagged answers) but not on priority or group. Agreement means the model is consistent, not that it is right, so the review gate also has to cover high priority regardless of confidence.
 
-2. **AI Triage (triage.py, shared by both entry points)**
-Uses an OpenAI model to analyze the incident and reason through:
-- Category (Infrastructure, Access Management, Network, Collaboration Tools, Application Support, General IT)
-- Priority (P1–P4)
-- SLA target
-- Assignment group
-- A plain-English reason for its decision
+### Limits
 
-3. **Human-in-the-loop for high priority**
-P3/P4 incidents are auto-assigned. P1/P2 incidents are flagged `pending_review` so a person confirms the call before anything critical is routed. Automation handles the volume; people keep control of the decisions that matter most.
+- One rater and 39 tickets. The gap is large, but a single administrator is not ground truth. A second rater would show how much people agree with each other.
+- The model and I may share textbook ITIL definitions; a real service desk has local rules.
+- The tickets are synthetic: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) (CC BY-NC 4.0), English only, filtered to the four IT queues, 300 sampled with a fixed seed.
+- Group accuracy is weak even against my labels (54%). The four queues overlap and there is no security team, so some tickets have no clean home.
 
-Every detected incident is logged to `incidents_log.json` with its timestamp, model, triage result, and status, for an auditable history.
+## What it does
 
-## Why Real System Metrics, Not Simulated Logs
+1. **Detects** CPU, memory, and disk breaches on the host (`monitor.py`). A cooldown means one sustained spike opens one incident, not an alert storm.
+2. **Triages** with an LLM (`triage.py`), three times per incident, and votes on category, priority, and assignment group.
+3. **Routes**: confident, low-priority incidents are auto-assigned. P1/P2, or any incident where the samples disagree, is held for human review.
+4. **Writes to ServiceNow** (`servicenow.py`) through the Table API:
+   - Runs as a dedicated `triage.agent` user (identity type Machine, `itil` role only), not admin.
+   - Learns the categories and assignment groups the instance actually uses from the Aggregate API on `incident`, so it needs no access to `sys_choice`.
+   - Maps priority to impact and urgency so ServiceNow calculates priority itself.
+   - Puts the AI's reasoning and agreement score in the work notes. Held incidents stay unassigned.
 
-I considered using my ServiceNow PDI for incident data, but PDIs only contain sample/demo data, not real operational signals. Instead, I used my own machine's live CPU, memory, and disk metrics via Python's psutil library — real, changing data, not a script printing fake logs. In production, this same architecture would point at a real server's metrics instead of a personal laptop.
+## Evaluation tools
 
-## How To Run
+| Command | What it does |
+|---|---|
+| `python3 evaluate.py ...` | Accuracy per field, a majority-class baseline, and confident vs. flagged accuracy |
+| `python3 audit.py make` | A blind sample for a human to label (labels hidden) |
+| `python3 audit.py label` | Label it in the terminal, one ticket at a time |
+| `python3 audit.py score` | Does the human agree more with the dataset or the model? |
+| `python3 audit.py confusion` | How each field goes wrong |
 
-Setup:
+## How to run
+
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export OPENAI_API_KEY="your-key-here"
-# optional: choose a different model (default: gpt-5.4-mini)
-export OPENAI_MODEL="gpt-5.4-mini"
+export OPENAI_API_KEY="..."            # optional: OPENAI_MODEL (default gpt-5.4-mini)
+
+# Optional: create incidents in ServiceNow
+export SN_INSTANCE="https://devXXXXX.service-now.com"
+export SN_USER="triage.agent"
+export SN_PASSWORD='...'
+
+python3 monitor.py                     # watch system health
+python3 stress.py                      # in a second terminal, trigger a CPU spike
 ```
 
-Manual triage (human-reported incident):
+Reproduce the evaluation:
+
 ```bash
-python3 triage.py
+curl -L -o tickets.csv "https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets/resolve/main/dataset-tickets-multi-lang-4-20k.csv"
+python3 evaluate.py --csv tickets.csv \
+  --filter "language=en" \
+  --filter "queue=Technical Support|IT Support|Product Support|Service Outages and Maintenance" \
+  --label "TYPE=type" --label "PRIORITY=priority" --label "ASSIGNMENT GROUP=queue" \
+  --n 300 --out eval_300
 ```
 
-Autonomous monitoring:
-```bash
-python3 monitor.py
-```
+## Context
 
-To trigger a live demo anomaly (in a second terminal):
-```bash
-python3 stress.py
-```
-
-## Sample Autonomous Output
-
-```
-[15:30:23] CPU: 99.9% | Memory: 76.5% | Disk: 20.7%
-
-🚨 ANOMALY DETECTED: High CPU usage detected: 99.9%
-Auto-generating incident and triaging with AI...
-
---- AI Triage Result ---
-CATEGORY: Infrastructure
-PRIORITY: P1 - Critical
-SLA: 1 hour
-ASSIGNMENT GROUP: Infrastructure Team
-REASON: High CPU usage at 99.9% indicates a critical system performance issue that requires immediate attention to prevent system failure or downtime.
-
-STATUS: Pending human review (high priority)
-============================================================
-Incident logged to incidents_log.json
-```
-
-## Tech Stack
-- Python 3.12
-- OpenAI API (model configurable via `OPENAI_MODEL`)
-- psutil (system metrics)
-
-## Architecture Notes
-- API keys and model choice are loaded from environment variables, never hardcoded — matching standard secrets-management practice in production systems.
-- Triage logic lives in one module shared by the manual and autonomous entry points.
+ServiceNow's Predictive Intelligence learns from historical tickets, and Now Assist now brings generative AI triage to the platform. This project builds the pattern end to end to understand it: detection, triage, a human checkpoint, and an honest test of how far to trust it.
 
 ## Author
-Akhil Yadati — ServiceNow Developer | ITSM Specialist
+
+Akhil Yadati, ServiceNow Developer
