@@ -8,7 +8,12 @@
 2. Score it: who do you agree with more, the dataset or the model?
      python3 audit.py score
 
-3. See how each field goes wrong (rows = dataset label, columns = model):
+3. Second rater: give them a blind subset of the same tickets, then compare.
+     python3 audit.py rater2 --n 20
+     python3 audit.py label --out audit_rater2.csv
+     python3 audit.py agree
+
+4. See how each field goes wrong (rows = dataset label, columns = model):
      python3 audit.py confusion --results eval_300.jsonl
 """
 import argparse
@@ -149,6 +154,58 @@ def score(args):
     print("\nIf you agree with the model more often than with the dataset, the labels are the weak link.")
 
 
+def _rated(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return {int(r["id"]): r for r in rows if all((r.get(COL[f]) or "").strip() for f in FIELDS)}
+
+
+def rater2(args):
+    first = _rated(args.source)
+    ids = sorted(random.Random(args.seed).sample(sorted(first), min(args.n, len(first))))
+    with open(args.out, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "subject", "body"] + [COL[x] for x in FIELDS])
+        for i in ids:
+            r = first[i]
+            w.writerow([i, r["subject"], r["body"]] + [""] * len(FIELDS))
+    print(f"Wrote {args.out} with {len(ids)} tickets for the second rater (no answers included).")
+    print(f"They label with: python3 audit.py label --out {args.out}")
+
+
+def _kappa(pairs):
+    """Cohen's kappa: agreement corrected for chance."""
+    n = len(pairs)
+    if not n:
+        return float("nan")
+    observed = sum(a == b for a, b in pairs) / n
+    ca, cb = Counter(a for a, _ in pairs), Counter(b for _, b in pairs)
+    expected = sum(ca[k] * cb[k] for k in ca) / (n * n)
+    return 1.0 if expected == 1 else (observed - expected) / (1 - expected)
+
+
+def agree(args):
+    key = {k["id"]: k for k in json.load(open(args.key))}
+    a, b = _rated(args.a), _rated(args.b)
+    ids = sorted(set(a) & set(b))
+    print(f"Tickets labeled by both raters: {len(ids)}\n")
+    print(f"{'Field':<18}{'R1 = R2':>9}{'kappa':>8}{'R1 = data':>11}{'R2 = data':>11}{'R1 = model':>12}{'R2 = model':>12}")
+    for fld in FIELDS:
+        col = COL[fld]
+        r1 = [a[i][col].strip().lower() for i in ids]
+        r2 = [b[i][col].strip().lower() for i in ids]
+        data = [key[i]["truth"][fld].lower() for i in ids]
+        model = [(key[i]["decision"].get(fld) or "").lower() for i in ids]
+
+        def pct(x, y):
+            return sum(p == q for p, q in zip(x, y)) / len(ids) if ids else 0
+
+        print(f"{fld:<18}{pct(r1, r2):>9.0%}{_kappa(list(zip(r1, r2))):>8.2f}{pct(r1, data):>11.0%}"
+              f"{pct(r2, data):>11.0%}{pct(r1, model):>12.0%}{pct(r2, model):>12.0%}")
+    print("\nR1 = R2 is the human ceiling: how often two people agree with each other.")
+    print("kappa: 0 = chance, 0.4-0.6 moderate, 0.6-0.8 substantial, 0.8+ near-perfect.")
+
+
 def confusion(args):
     results = load_results(args.results)
     for fld in FIELDS:
@@ -174,10 +231,19 @@ def main():
     for p in (m, sub.add_parser("score"), lab):
         p.add_argument("--out", default="audit.csv")
         p.add_argument("--key", default="audit_key.json")
+    r2 = sub.add_parser("rater2")
+    r2.add_argument("--source", default="audit_clean.csv")
+    r2.add_argument("--n", type=int, default=20)
+    r2.add_argument("--seed", type=int, default=11)
+    r2.add_argument("--out", default="audit_rater2.csv")
+    ag = sub.add_parser("agree")
+    ag.add_argument("--a", default="audit_clean.csv")
+    ag.add_argument("--b", default="audit_rater2.csv")
+    ag.add_argument("--key", default="audit_key.json")
     c = sub.add_parser("confusion")
     c.add_argument("--results", default="eval_300.jsonl")
     args = ap.parse_args()
-    {"make": make, "label": label, "score": score, "confusion": confusion}[args.cmd](args)
+    {"make": make, "label": label, "score": score, "rater2": rater2, "agree": agree, "confusion": confusion}[args.cmd](args)
 
 
 if __name__ == "__main__":
