@@ -6,28 +6,46 @@ An agent that detects system problems, opens incidents in ServiceNow, and triage
 
 *Live run: `stress.py` pushes CPU to 100%, the agent opens one incident, the model triages it, and the high-priority result is held for human review.*
 
-## Key finding
+## Key findings
 
-On 300 labeled IT tickets, the model looked worse than guessing on priority (38% vs. a 47% baseline). A blind audit told a different story. I labeled 39 of those tickets myself, as a ServiceNow administrator, without seeing either the dataset's label or the model's answer.
+### 1. The benchmark was broken, not the model
 
-| Field | I agree with the dataset | I agree with the model | Random chance |
+On 300 labeled IT tickets, the model looked worse than guessing on priority (38% vs. a 47% majority-class baseline). Two people then labeled the tickets blind, without seeing the dataset's label or the model's answer: me (39 tickets) and a second rater (20 of the same tickets).
+
+On the 20 tickets both of us labeled:
+
+| Field | Rater 1 vs rater 2 | Raters vs dataset | Raters vs model |
 |---|---|---|---|
-| Type (Incident / Request / Problem / Change) | 59% | **85%** | 25% |
-| Priority (high / medium / low) | 36% | **85%** | 33% |
-| Assignment group (4 IT queues) | 28% | **54%** | 25% |
+| Type | 90% (kappa 0.73) | 60-70% | **95%** |
+| Priority | 85% (kappa 0.75) | 45% | **80-95%** |
+| Assignment group | 95% (kappa 0.92) | **25%** (chance) | 50-55% |
 
-On priority and group, the dataset's labels were close to random relative to an administrator's judgment. The model's "low accuracy" was mostly disagreement with a noisy answer key.
+The two raters agreed strongly with each other and disagreed with the dataset, so the labels are the weak link. On type and priority, the model agrees with each rater about as often as the raters agree with each other, which is human-level on this data.
 
 **Lesson:** before trusting an AI triage score, check the labels it is scored against.
 
-**Second finding: self-consistency was not a reliable confidence signal.** Each ticket is triaged three times, and disagreement routes it to a human. Across the 300 tickets, the flag caught mistakes at roughly the rate random flagging would. It helped on type (72% vs. 52% accuracy for confident vs. flagged answers) but not on priority or group. Agreement means the model is consistent, not that it is right, so the review gate also has to cover high priority regardless of confidence.
+### 2. Assignment group is the real gap, and part of it is missing context
+
+On group, the raters agreed 95% but the model only about 50%. The raters had a one-line definition of each team; the model only had the team names. Giving the model the same definitions:
+
+| Field | Rater 1: before -> after | Rater 2: before -> after |
+|---|---|---|
+| Assignment group | 54% -> **67%** | 55% -> **75%** |
+| Priority | 85% -> 92% | 95% -> 90% |
+| Type | 85% -> 77% | 95% -> 100% |
+
+Group improved by 13-20 points but did not reach the human level. The second rater found why: on 7 of 19 tickets, one missing fact decided the call, usually *is the affected system internal company IT or the customer's product?* In ServiceNow that comes from structured fields (caller, configuration item, service), not the ticket text. Text-only triage can't route what the text doesn't say. Feeding caller and CI context into the prompt is the next step.
+
+### 3. Self-consistency is not a confidence signal
+
+Each ticket is triaged three times and disagreement routes it to a human. Across 300 tickets, that flag caught mistakes at about the rate random flagging would. Consistent does not mean correct, so P1/P2 always go to a person regardless of agreement.
 
 ### Limits
 
-- One rater and 39 tickets. The gap is large, but a single administrator is not ground truth. A second rater would show how much people agree with each other.
-- The model and I may share textbook ITIL definitions; a real service desk has local rules.
+- Small samples: 39 tickets for rater 1, 20 shared with rater 2. One ticket moves a percentage by 2.5-5 points, so treat small differences (like type dropping 85% -> 77%) as noise.
+- The definitions experiment was measured on the same tickets the raters labeled, and the "before" answers came from a separate run, so some change is run-to-run variation.
+- Both raters and the model may share textbook ITIL definitions; a real service desk has local rules.
 - The tickets are synthetic: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) (CC BY-NC 4.0), English only, filtered to the four IT queues, 300 sampled with a fixed seed.
-- Group accuracy is weak even against my labels (54%). The four queues overlap and there is no security team, so some tickets have no clean home.
 
 ## What it does
 
@@ -48,6 +66,8 @@ On priority and group, the dataset's labels were close to random relative to an 
 | `python3 audit.py make` | A blind sample for a human to label (labels hidden) |
 | `python3 audit.py label` | Label it in the terminal, one ticket at a time |
 | `python3 audit.py score` | Does the human agree more with the dataset or the model? |
+| `python3 audit.py rater2` / `agree` | Second blind rater and inter-rater agreement (Cohen's kappa) |
+| `python3 audit.py retriage` | Re-run the model with the raters' definitions and compare |
 | `python3 audit.py confusion` | How each field goes wrong |
 
 ## How to run
