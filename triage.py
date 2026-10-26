@@ -33,7 +33,7 @@ def client():
     return _client
 
 
-def build_prompt(title, description, taxonomy):
+def build_prompt(title, description, taxonomy, definitions=None):
     lines = [
         "You are an expert ITSM triage agent. Analyze this IT incident and respond ONLY in this exact format,",
         "choosing each value exactly as written from its list:",
@@ -41,16 +41,21 @@ def build_prompt(title, description, taxonomy):
     ]
     for field, options in taxonomy.items():
         lines.append(f"{field}: [one of: {', '.join(options)}]")
+    if definitions:
+        lines += ["", "What each value means:"]
+        for field, meanings in definitions.items():
+            for option, meaning in meanings.items():
+                lines.append(f"- {field} = {option}: {meaning}")
     lines.append("REASON: [one sentence explaining your choice of priority and group]")
     lines += ["", f"Incident Title: {title}", f"Incident Description: {description}"]
     return "\n".join(lines)
 
 
-def ai_triage(title, description, taxonomy=DEFAULT_TAXONOMY):
+def ai_triage(title, description, taxonomy=DEFAULT_TAXONOMY, definitions=None):
     """One model call. Returns (raw_text, total_tokens)."""
     response = client().chat.completions.create(
         model=MODEL,
-        messages=[{"role": "user", "content": build_prompt(title, description, taxonomy)}],
+        messages=[{"role": "user", "content": build_prompt(title, description, taxonomy, definitions)}],
         max_completion_tokens=2000,
     )
     usage = getattr(response, "usage", None)
@@ -79,7 +84,7 @@ def _normalise(value, options):
     return value or ""
 
 
-def triage_with_confidence(title, description, taxonomy=DEFAULT_TAXONOMY, samples=None):
+def triage_with_confidence(title, description, taxonomy=DEFAULT_TAXONOMY, samples=None, definitions=None):
     """Ask the model `samples` times and vote.
 
     Returns a dict with the majority answer per field, the agreement score,
@@ -87,7 +92,7 @@ def triage_with_confidence(title, description, taxonomy=DEFAULT_TAXONOMY, sample
     """
     samples = samples or SAMPLES
     with ThreadPoolExecutor(max_workers=samples) as pool:
-        results = list(pool.map(lambda _: ai_triage(title, description, taxonomy), range(samples)))
+        results = list(pool.map(lambda _: ai_triage(title, description, taxonomy, definitions), range(samples)))
 
     parsed = []
     for text, _ in results:

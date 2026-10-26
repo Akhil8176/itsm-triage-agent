@@ -13,10 +13,14 @@
      python3 audit.py label --out audit_rater2.csv
      python3 audit.py agree
 
-4. See how each field goes wrong (rows = dataset label, columns = model):
+4. Re-run the model with the same definitions the raters had, and compare:
+     python3 audit.py retriage
+
+5. See how each field goes wrong (rows = dataset label, columns = model):
      python3 audit.py confusion --results eval_300.jsonl
 """
 import argparse
+import os
 import csv
 import json
 import random
@@ -63,17 +67,24 @@ def make(args):
         print(f"  {COL[fld]}: {', '.join(sorted(options[fld]))}")
 
 
+# The same guidance both human raters had. The definitions experiment gives it to the model too.
 GUIDE = {
     "TYPE": {
-        "Incident": "something is broken or degraded",
-        "Request": "asking for something (access, info, a new service)",
-        "Problem": "a recurring issue or root cause behind several incidents",
+        "Incident": "something that worked is now broken, slow, or compromised",
+        "Request": "asking for something new (access, information, a setup); nothing is broken",
+        "Problem": "the same issue keeps recurring, or they want the root cause found",
         "Change": "asking to modify, upgrade, or reconfigure something",
     },
     "PRIORITY": {
-        "high": "business-critical, many users affected, or work fully blocked",
-        "medium": "impaired, but there is a workaround",
+        "high": "many users affected, business-critical system, someone fully blocked, security issue, or data loss",
+        "medium": "impaired but there is a workaround, or only one person affected",
         "low": "minor, cosmetic, or a general question",
+    },
+    "ASSIGNMENT GROUP": {
+        "IT Support": "internal company IT: laptops, accounts, passwords, network, VPN, printers, employee software",
+        "Technical Support": "technical troubleshooting: errors, bugs, configuration, integrations, APIs",
+        "Product Support": "questions or issues about how a specific product or feature works",
+        "Service Outages and Maintenance": "a service is down for many users, or planned maintenance or downtime",
     },
 }
 
@@ -206,6 +217,48 @@ def agree(args):
     print("kappa: 0 = chance, 0.4-0.6 moderate, 0.6-0.8 substantial, 0.8+ near-perfect.")
 
 
+def retriage(args):
+    """Re-run the model on the audited tickets with the raters' definitions, and compare."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from triage import MODEL, triage_with_confidence
+
+    key = {k["id"]: k for k in json.load(open(args.key))}
+    r1, r2 = _rated(args.a), _rated(args.b) if os.path.exists(args.b) else {}
+    taxonomy = _options(args.results)
+    ids = sorted(r1)
+    print(f"Model: {MODEL} | {len(ids)} tickets | 3 samples each | with team definitions")
+
+    def run(i):
+        row = r1[i]
+        return i, triage_with_confidence(row["subject"] or row["body"][:80], row["body"] or row["subject"],
+                                         taxonomy, samples=3, definitions=GUIDE)
+
+    new = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for i, res in pool.map(run, ids):
+            new[i] = res["decision"]
+    with open(args.out, "w") as f:
+        for i in ids:
+            f.write(json.dumps({"id": i, "decision": new[i]}) + "\n")
+
+    def agree(raters, decisions, fld):
+        shared = [i for i in raters if i in decisions]
+        if not shared:
+            return "  n/a"
+        hits = sum(raters[i][COL[fld]].strip().lower() == (decisions[i].get(fld) or "").lower() for i in shared)
+        return f"{hits / len(shared):>5.0%}"
+
+    old = {i: key[i]["decision"] for i in key}
+    data = {i: key[i]["truth"] for i in key}
+    print(f"\n{'Field':<18}{'R1 vs old':>11}{'R1 vs new':>11}{'R2 vs old':>11}{'R2 vs new':>11}{'new vs data':>13}")
+    for fld in FIELDS:
+        print(f"{fld:<18}{agree(r1, old, fld):>11}{agree(r1, new, fld):>11}"
+              f"{agree(r2, old, fld):>11}{agree(r2, new, fld):>11}{agree({i: {COL[fld]: data[i][fld]} for i in ids}, new, fld):>13}")
+    print("\nold = original prompt (team names only); new = same prompt plus the definitions the raters had.")
+    print(f"R1 = {len(r1)} tickets, R2 = {len(r2)} tickets. Saved {args.out}.")
+
+
 def confusion(args):
     results = load_results(args.results)
     for fld in FIELDS:
@@ -240,10 +293,16 @@ def main():
     ag.add_argument("--a", default="audit_clean.csv")
     ag.add_argument("--b", default="audit_rater2.csv")
     ag.add_argument("--key", default="audit_key.json")
+    rt = sub.add_parser("retriage")
+    rt.add_argument("--a", default="audit_clean.csv")
+    rt.add_argument("--b", default="audit_rater2.csv")
+    rt.add_argument("--key", default="audit_key.json")
+    rt.add_argument("--results", default="eval_300.jsonl")
+    rt.add_argument("--out", default="retriage.jsonl")
     c = sub.add_parser("confusion")
     c.add_argument("--results", default="eval_300.jsonl")
     args = ap.parse_args()
-    {"make": make, "label": label, "score": score, "rater2": rater2, "agree": agree, "confusion": confusion}[args.cmd](args)
+    {"make": make, "label": label, "score": score, "rater2": rater2, "agree": agree, "retriage": retriage, "confusion": confusion}[args.cmd](args)
 
 
 if __name__ == "__main__":
